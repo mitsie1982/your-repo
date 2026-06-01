@@ -104,6 +104,34 @@ EOF
         echo "decision=$(echo "$out" | jq -r '.decision')" >> $GITHUB_OUTPUT
         echo "$out" > ai-agent.raw.json
 
+    - name: Create placeholder artifacts for CI testing
+      run: |
+        set -e
+        # deps.json: simple graph placeholder
+        if [ ! -f deps.json ]; then
+          cat > deps.json <<'JSON'
+{ "nodes": [], "edges": [] }
+JSON
+        fi
+        # kpis.json: minimal KPI snapshot including a budget_burn field
+        if [ ! -f kpis.json ]; then
+          cat > kpis.json <<'JSON'
+{ "delivery": {}, "quality": {}, "cost": { "budget_burn": 0 } }
+JSON
+        fi
+        # actions.json: minimal plan
+        if [ ! -f actions.json ]; then
+          cat > actions.json <<'JSON'
+[]
+JSON
+        fi
+        # ai-agent.raw.json: ensure a minimal decision structure
+        if [ ! -f ai-agent.raw.json ]; then
+          cat > ai-agent.raw.json <<'JSON'
+{ "requires_arb": false, "escalate": false, "decision": "approve" }
+JSON
+        fi
+
     - name: Upload AI artifacts
       uses: actions/upload-artifact@v4
       with:
