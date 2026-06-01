@@ -1,0 +1,68 @@
+name: Track-F-Governance
+on:
+  pull_request:
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  governance-orchestrator:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq
+
+    - name: Generate PR diff
+      id: gen_diff
+      run: |
+        set -e
+        # Ensure base ref is available for PRs
+        if [ -n "${{ github.base_ref }}" ]; then
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" || true
+          git diff origin/${{ github.base_ref }}...HEAD > pr.diff || true
+        else
+          git diff --name-only HEAD^ HEAD > pr.diff || true
+        fi
+
+    - name: Run Static Analysis & Security Scan
+      run: |
+        dotnet build
+        dotnet format || true
+        security-scan --policy=TrackF
+
+    - name: Generate Dependency Map
+      run: generate-deps --output=deps.json
+
+    - name: KPI Snapshot
+      run: collect-kpis --targets=delivery,quality,cost --output=kpis.json
+
+    - name: PMO Decision Engine (AI)
+      id: pmo
+      run: |
+        set -e
+        out=$(ai-agent --input deps.json,kpis.json,pr.diff --policies=PMO,ARB,Security,Budget --action-plan=actions.json --format=json)
+        # Write outputs to GITHUB_OUTPUT so subsequent steps can reference them
+        echo "requires_arb=$(echo "$out" | jq -r '.requires_arb')" >> $GITHUB_OUTPUT
+        echo "escalate=$(echo "$out" | jq -r '.escalate')" >> $GITHUB_OUTPUT
+        echo "decision=$(echo "$out" | jq -r '.decision')" >> $GITHUB_OUTPUT
+        echo "$out" > ai-agent.raw.json
+
+    - name: ARB Approval Gate
+      if: steps.pmo.outputs.requires_arb == 'true'
+      run: arb-approval --ticket=actions.json
+
+    - name: ESC Escalation
+      if: steps.pmo.outputs.escalate == 'true'
+      run: notify-exec --payload=actions.json
+
+    - name: Enforce Budget Controls
+      run: budget-check --report=kpis.json --thresholds=budget.yaml
+
+    - name: Merge or Block
+      run: finalize-pr --decision="${{ steps.pmo.outputs.decision }}"
