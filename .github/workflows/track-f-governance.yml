@@ -18,6 +18,26 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y jq
 
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '7.0'
+
+    - name: Verify runner tools
+      run: |
+        set -e
+        missing=()
+        for cmd in dotnet security-scan generate-deps collect-kpis ai-agent arb-approval notify-exec budget-check finalize-pr jq; do
+          if ! command -v $cmd >/dev/null 2>&1; then
+            missing+=("$cmd")
+          fi
+        done
+        if [ ${#missing[@]} -ne 0 ]; then
+          echo "Missing required runner tools: ${missing[*]}"
+          echo "Install these on the runner image or add workflow steps to install them."
+          exit 1
+        fi
+
     - name: Generate PR diff
       id: gen_diff
       run: |
@@ -31,38 +51,78 @@ jobs:
         fi
 
     - name: Run Static Analysis & Security Scan
+      env:
+        SECURITY_SCAN_TOKEN: ${{ secrets.SECURITY_SCAN_TOKEN }}
       run: |
         dotnet build
         dotnet format || true
-        security-scan --policy=TrackF
+        security-scan --policy=TrackF --token="$SECURITY_SCAN_TOKEN"
 
     - name: Generate Dependency Map
       run: generate-deps --output=deps.json
 
     - name: KPI Snapshot
-      run: collect-kpis --targets=delivery,quality,cost --output=kpis.json
+      env:
+        KPI_DASHBOARD_WRITE_KEY: ${{ secrets.KPI_DASHBOARD_WRITE_KEY }}
+      run: |
+        collect-kpis --targets=delivery,quality,cost --output=kpis.json --write-key="$KPI_DASHBOARD_WRITE_KEY"
+
+    - name: Upload KPI artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: kpis.json
+        path: kpis.json
 
     - name: PMO Decision Engine (AI)
       id: pmo
+      env:
+        AI_AGENT_API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
       run: |
         set -e
-        out=$(ai-agent --input deps.json,kpis.json,pr.diff --policies=PMO,ARB,Security,Budget --action-plan=actions.json --format=json)
+        out=$(ai-agent --input deps.json,kpis.json,pr.diff --policies=PMO,ARB,Security,Budget --action-plan=actions.json --format=json --api-key="$AI_AGENT_API_KEY")
         # Write outputs to GITHUB_OUTPUT so subsequent steps can reference them
         echo "requires_arb=$(echo "$out" | jq -r '.requires_arb')" >> $GITHUB_OUTPUT
         echo "escalate=$(echo "$out" | jq -r '.escalate')" >> $GITHUB_OUTPUT
         echo "decision=$(echo "$out" | jq -r '.decision')" >> $GITHUB_OUTPUT
         echo "$out" > ai-agent.raw.json
 
+    - name: Upload AI artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: pmo-artifacts
+        path: |
+          actions.json
+          ai-agent.raw.json
+
     - name: ARB Approval Gate
       if: steps.pmo.outputs.requires_arb == 'true'
-      run: arb-approval --ticket=actions.json
+      env:
+        ARB_TICKET_API_TOKEN: ${{ secrets.ARB_TICKET_API_TOKEN }}
+      run: arb-approval --ticket=actions.json --token="$ARB_TICKET_API_TOKEN"
 
     - name: ESC Escalation
       if: steps.pmo.outputs.escalate == 'true'
-      run: notify-exec --payload=actions.json
+      env:
+        ESC_NOTIFICATION_WEBHOOK: ${{ secrets.ESC_NOTIFICATION_WEBHOOK }}
+      run: notify-exec --payload=actions.json --webhook="$ESC_NOTIFICATION_WEBHOOK"
 
     - name: Enforce Budget Controls
-      run: budget-check --report=kpis.json --thresholds=budget.yaml
+      env:
+        COST_MANAGEMENT_API_KEY: ${{ secrets.COST_MANAGEMENT_API_KEY }}
+      run: budget-check --report=kpis.json --thresholds=budget.yaml --api-key="$COST_MANAGEMENT_API_KEY"
 
     - name: Merge or Block
-      run: finalize-pr --decision="${{ steps.pmo.outputs.decision }}"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: finalize-pr --decision="${{ steps.pmo.outputs.decision }}" --github-token="$GITHUB_TOKEN"
+
+    - name: Upload workflow artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: track-f-artifacts
+        path: |
+          deps.json
+          kpis.json
+          actions.json
+          ai-agent.raw.json
