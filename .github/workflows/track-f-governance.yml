@@ -1,6 +1,19 @@
 name: Track-F-Governance
 on:
+  push:
+    branches:
+      - main
+      - 'phase3/*'
   pull_request:
+    branches:
+      - main
+      - 'phase3/*'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual dispatch'
+        required: false
+        default: 'manual-trigger'
   schedule:
     - cron: '0 2 * * *'
 
